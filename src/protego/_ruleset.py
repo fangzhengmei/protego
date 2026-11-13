@@ -28,6 +28,15 @@ class VisitTime(NamedTuple):
     end_time: time
 
 
+class MatchedRule(NamedTuple):
+    """The rule that decides whether a URL can be fetched."""
+
+    #: "allow" or "disallow".
+    directive: str
+    #: The rule value as written in robots.txt.
+    pattern: str
+
+
 class _Rule(NamedTuple):
     field: str
     value: _URLPattern
@@ -74,7 +83,7 @@ class _RuleSet:
         """
         cache = self._parser_instance._url_patterns
         if pattern not in cache:
-            cache[pattern] = _URLPattern(_quote_pattern(pattern))
+            cache[pattern] = _URLPattern(_quote_pattern(pattern), source=pattern)
         return cache[pattern]
 
     def allow(self, pattern: str) -> None:
@@ -140,6 +149,37 @@ class _RuleSet:
             prefixes = self._build_index()
         rules = self._flat_rules if url.startswith(prefixes) else self._special_rules
         return _can_fetch(rules, url)
+
+    def explain(self, url: str) -> tuple[_Rule, list[_Rule]] | None:
+        """Return the rule that decides whether *url* can be fetched, along
+        with any other matching rules of the same priority that the deciding
+        rule outranks, or None if no rule matches.
+
+        Goes through the same normalization and rule ordering as
+        :meth:`can_fetch`, so both always agree on the outcome.
+        """
+        url = _quote_path(url)
+        prefixes = self._plain_prefixes
+        if prefixes is None:
+            prefixes = self._build_index()
+        if url.startswith(prefixes):
+            candidates = self._rules
+        else:
+            candidates = [r for r in self._rules if r.value.kind != _PREFIX]
+        winner = None
+        tied: list[_Rule] = []
+        # The rules are sorted by priority, so the first match decides and
+        # only rules of the same priority can compete with it.
+        for rule in candidates:
+            if not rule.value.matches(url):
+                continue
+            if winner is None:
+                winner = rule
+            elif rule.value.priority == winner.value.priority:
+                tied.append(rule)
+        if winner is None:
+            return None
+        return winner, tied
 
     @property
     def crawl_delay(self) -> float | None:

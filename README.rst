@@ -61,6 +61,8 @@ Usage
    False
    >>> rp.can_fetch("http://example.com/account/contact", "mybot")
    False
+   >>> rp.explain("http://example.com/account/contact", "mybot")
+   Explanation(allowed=False, user_agent='*', rule=MatchedRule(directive='disallow', pattern='/account/contact$'), reason="the wildcard group '*' applies to user agent 'mybot', no more specific group matched; disallow rule '/account/contact$' (pattern length 17) is the most specific match")
    >>> rp.crawl_delay("mybot")
    4.0
    >>> rp.request_rate("mybot")

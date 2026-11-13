@@ -2,6 +2,16 @@
 Protego changelog
 =================
 
+Unreleased
+==========
+
+-   Added ``Protego.explain()``, which returns the same fetch decision as
+    ``can_fetch()`` along with the rule group and the rule that decided and
+    why they take precedence, so that crawlers can see, for example, which
+    group won when both a wildcard and a specific ``User-agent`` group match,
+    or which rule won among percent-encoded, wildcard and ``$``-anchored
+    patterns.
+
 0.7.0 (2026-09-21)
 ==================
 

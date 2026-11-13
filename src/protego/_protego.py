@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, NamedTuple, Self
 from urllib.parse import urlparse
 
-from ._ruleset import RequestRate, VisitTime, _RuleSet
+from ._ruleset import MatchedRule, RequestRate, VisitTime, _RuleSet
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -13,6 +13,20 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+class Explanation(NamedTuple):
+    """The outcome of :meth:`Protego.explain`."""
+
+    #: Whether the URL can be fetched, the same result can_fetch() returns.
+    allowed: bool
+    #: The user agent of the rule group that decided, or None if no group
+    #: applied.
+    user_agent: str | None
+    #: The rule that decided, or None if no rule matched the URL.
+    rule: MatchedRule | None
+    #: A human-readable account of how the decision was reached.
+    reason: str
 
 
 _DISALLOW_DIRECTIVE = {
@@ -267,6 +281,83 @@ class Protego:
         if not matched_rule_set:
             return True
         return matched_rule_set.can_fetch(url)
+
+    def explain(self, url: str, user_agent: str) -> Explanation:
+        """Return the fetch decision for the URL and the user agent, along
+        with the rule group and the rule that decided and why they take
+        precedence.
+
+        The decision goes through the same rule group selection, URL
+        normalization and rule ordering as :meth:`can_fetch`, so
+        ``explain(url, user_agent).allowed`` always equals
+        ``can_fetch(url, user_agent)``.
+        """
+        if "/robots.txt" in url and urlparse(url).path == "/robots.txt":
+            return Explanation(
+                allowed=True,
+                user_agent=None,
+                rule=None,
+                reason="robots.txt itself can always be fetched",
+            )
+        matched_rule_set = self._get_matching_rule_set(user_agent)
+        if matched_rule_set is None:
+            return Explanation(
+                allowed=True,
+                user_agent=None,
+                rule=None,
+                reason=(
+                    f"no rule group applies to user agent {user_agent!r}, "
+                    "so fetching is allowed by default"
+                ),
+            )
+        group_reason = self._group_reason(user_agent, matched_rule_set)
+        group = matched_rule_set.user_agent
+        explained = matched_rule_set.explain(url)
+        if explained is None:
+            return Explanation(
+                allowed=True,
+                user_agent=group,
+                rule=None,
+                reason=(
+                    f"{group_reason}; no rule of the group matches the URL, "
+                    "so fetching is allowed by default"
+                ),
+            )
+        rule, tied = explained
+        rule_reason = (
+            f"{rule.field} rule {rule.value.source!r} (pattern length "
+            f"{rule.value.priority}) is the most specific match"
+        )
+        if rule.field == "allow" and any(t.field == "disallow" for t in tied):
+            rule_reason += (
+                "; an equally long disallow rule also matches, and allow wins ties"
+            )
+        return Explanation(
+            allowed=rule.field == "allow",
+            user_agent=group,
+            rule=MatchedRule(directive=rule.field, pattern=rule.value.source),
+            reason=f"{group_reason}; {rule_reason}",
+        )
+
+    def _group_reason(self, user_agent: str, matched_rule_set: _RuleSet) -> str:
+        """Return why *matched_rule_set* is the group that applies to
+        *user_agent*."""
+        group = matched_rule_set.user_agent
+        if group == "*":
+            return (
+                f"the wildcard group '*' applies to user agent {user_agent!r}, "
+                "no more specific group matched"
+            )
+        score = matched_rule_set.applies_to(user_agent)
+        if "*" in self._user_agents:
+            return (
+                f"group {group!r} (match length {score}) outranks the "
+                f"wildcard group '*' (match length 1) for user agent {user_agent!r}"
+            )
+        return (
+            f"group {group!r} is the best match for user agent "
+            f"{user_agent!r} (match length {score})"
+        )
 
     def crawl_delay(self, user_agent: str) -> float | None:
         """Return the crawl delay specified for the user agent as a float.

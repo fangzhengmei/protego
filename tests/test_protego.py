@@ -1522,3 +1522,161 @@ def test_utf8_bom(prefix, rule_applies):
     content = "User-agent: *\nDisallow: /private\n"
     parsed = Protego.parse(prefix + content)
     assert parsed.can_fetch("/private", "anybot") is not rule_applies
+
+
+class TestExplain:
+    def test_specific_group_outranks_wildcard(self):
+        content = (
+            "User-agent: *\n"
+            "Disallow: /shared\n"
+            "User-agent: mybot\n"
+            "Allow: /shared\n"
+            "Disallow: /private\n"
+        )
+        rp = Protego.parse(content)
+        explanation = rp.explain("https://example.com/private/x", "mybot")
+        assert explanation.allowed is False
+        assert explanation.user_agent == "mybot"
+        assert explanation.rule == ("disallow", "/private")
+        assert explanation.rule.directive == "disallow"
+        assert explanation.rule.pattern == "/private"
+        assert "'mybot'" in explanation.reason
+        assert "'*'" in explanation.reason
+
+        # The wildcard group still governs other user agents.
+        explanation = rp.explain("https://example.com/shared/x", "otherbot")
+        assert explanation.allowed is False
+        assert explanation.user_agent == "*"
+        assert explanation.rule.pattern == "/shared"
+
+    def test_wildcard_group_reason(self):
+        rp = Protego.parse("User-agent: *\nDisallow: /a\n")
+        explanation = rp.explain("https://example.com/a", "somebot")
+        assert explanation.user_agent == "*"
+        assert "wildcard" in explanation.reason
+
+    def test_no_matching_group(self):
+        rp = Protego.parse("User-agent: foobot\nDisallow: /\n")
+        explanation = rp.explain("https://example.com/anything", "mybot")
+        assert explanation.allowed is True
+        assert explanation.user_agent is None
+        assert explanation.rule is None
+        assert "allowed by default" in explanation.reason
+
+    def test_no_matching_rule(self):
+        rp = Protego.parse("User-agent: *\nDisallow: /private\n")
+        explanation = rp.explain("https://example.com/public", "mybot")
+        assert explanation.allowed is True
+        assert explanation.user_agent == "*"
+        assert explanation.rule is None
+        assert "allowed by default" in explanation.reason
+
+    def test_robots_txt_itself(self):
+        rp = Protego.parse("User-agent: *\nDisallow: /\n")
+        explanation = rp.explain("https://example.com/robots.txt", "mybot")
+        assert explanation.allowed is True
+        assert explanation.rule is None
+
+    def test_longest_match_wins(self):
+        content = "User-agent: *\nDisallow: /\nAllow: /account\n"
+        rp = Protego.parse(content)
+        explanation = rp.explain("https://example.com/account", "mybot")
+        assert explanation.allowed is True
+        assert explanation.rule.directive == "allow"
+        assert explanation.rule.pattern == "/account"
+        assert "most specific" in explanation.reason
+
+    def test_allow_wins_ties(self):
+        content = "User-agent: *\nDisallow: /page\nAllow: /page\n"
+        rp = Protego.parse(content)
+        explanation = rp.explain("https://example.com/page", "mybot")
+        assert explanation.allowed is True
+        assert explanation.rule.directive == "allow"
+        assert "allow wins ties" in explanation.reason
+
+    def test_percent_encoding_wildcard_and_anchor(self):
+        content = (
+            "User-agent: *\n"
+            "Allow: /a%C3%A7/b\n"
+            "Disallow: /a*/b\n"
+            "Disallow: /anchored$\n"
+            "Allow: /anchored\n"
+        )
+        rp = Protego.parse(content)
+        # The percent-encoded spelling and the decoded spelling of the URL
+        # go through the same adjudication.
+        for url in ("https://example.com/aç/b", "https://example.com/a%C3%A7/b"):
+            explanation = rp.explain(url, "mybot")
+            assert explanation.allowed is True
+            assert explanation.rule.directive == "allow"
+            assert explanation.rule.pattern == "/a%C3%A7/b"
+        # The $ anchor keeps /anchored/elsewhere out of the disallow rule.
+        explanation = rp.explain("https://example.com/anchored/elsewhere", "mybot")
+        assert explanation.allowed is True
+        assert explanation.rule.pattern == "/anchored"
+        explanation = rp.explain("https://example.com/anchored", "mybot")
+        assert explanation.allowed is False
+        assert explanation.rule.pattern == "/anchored$"
+
+    def test_rule_order_does_not_change_result(self):
+        rules = ["Disallow: /a", "Allow: /a/b", "Disallow: /a/b/c$"]
+        explanations = []
+        for order in ([0, 1, 2], [2, 1, 0], [1, 2, 0]):
+            content = "User-agent: *\n" + "\n".join(rules[i] for i in order)
+            rp = Protego.parse(content)
+            explanations.append(
+                [rp.explain(f"https://example.com{path}", "mybot") for path in ("/a", "/a/b", "/a/b/c")]
+            )
+        assert explanations[0] == explanations[1] == explanations[2]
+
+    def test_cache_does_not_change_result(self):
+        content = "User-agent: *\nDisallow: /private\nUser-agent: mybot\nAllow: /private\n"
+        rp = Protego.parse(content)
+        url = "https://example.com/private/x"
+        # Explain after can_fetch has populated the caches, and the other
+        # way around with a fresh parser.
+        assert rp.can_fetch(url, "mybot") is True
+        assert rp.explain(url, "mybot").allowed is True
+        rp = Protego.parse(content)
+        assert rp.explain(url, "mybot").allowed is True
+        assert rp.can_fetch(url, "mybot") is True
+
+    def test_reload_keeps_explain_and_can_fetch_in_sync(self):
+        content_v1 = "User-agent: *\nDisallow: /private\n"
+        content_v2 = "User-agent: *\nAllow: /private\n"
+        url = "https://example.com/private/x"
+        for content in (content_v1, content_v2):
+            rp = Protego.parse(content)
+            assert rp.explain(url, "mybot").allowed == rp.can_fetch(url, "mybot")
+
+    def test_explain_agrees_with_can_fetch(self):
+        content = (
+            "User-agent: *\n"
+            "Disallow: /\n"
+            "Allow: /about\n"
+            "Allow: /account\n"
+            "Disallow: /account/contact$\n"
+            "Disallow: /account/*/profile\n"
+            "User-agent: mybot\n"
+            "Allow: /account/contact\n"
+        )
+        rp = Protego.parse(content)
+        urls = [
+            "https://example.com/",
+            "https://example.com/about",
+            "https://example.com/account",
+            "https://example.com/account/contact",
+            "https://example.com/account/contact/us",
+            "https://example.com/account/john/profile",
+            "https://example.com/account/john/profile/edit",
+            "https://example.com/%61ccount",
+        ]
+        for user_agent in ("mybot", "otherbot", "*"):
+            for url in urls:
+                explanation = rp.explain(url, user_agent)
+                assert explanation.allowed == rp.can_fetch(url, user_agent)
+                if explanation.allowed and explanation.rule is not None:
+                    assert explanation.rule.directive == "allow"
+                if not explanation.allowed:
+                    assert explanation.rule is not None
+                    assert explanation.rule.directive == "disallow"
